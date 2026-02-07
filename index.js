@@ -30,10 +30,14 @@ app.post("/v1/chat/completions", async (req, res) => {
     const oldMessages = messages.slice(0, -50);
     const summary = await summarizeMessages(oldMessages);
 
+    // Separe a definição do personagem (que não deve ser resumida)
+    const charPersonality = messages.find(m => m.role === 'system')?.content || "";
+    
     const payload = {
       model: "moonshotai/kimi-k2-thinking",
       messages: [
-        { role: "system", content: `Contexto anterior: ${summary}` },
+        { role: "system", content: charPersonality }, // A personalidade SEMPRE inteira aqui
+        { role: "system", content: `Resumo do histórico: ${summary}` },
         ...lastMessages
       ],
       max_tokens: 16384, 
