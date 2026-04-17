@@ -81,14 +81,6 @@ app.post("/v1/chat/completions", async (req, res) => {
       // 4. Devolve o texto limpo para o objeto
       responseData.choices[0].message.content = content.trim();
       
-      console.log("--- TEXTO LIMPO ---");
-      console.log(responseData.choices[0].message.content.substring(0, 100));
-
-      console.log("---PERSONALIDADE---");
-      console.log(charPersonality);
-
-      console.log("---RESUMO---");
-      console.log(summary);
     }
 
     // Envia para o Janitor AI
