@@ -34,7 +34,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     const charPersonality = messages.find(m => m.role === 'system')?.content || "";
     
     const payload = {
-      model:"nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored",
+      model:"deepseek-ai/deepseek-v4.1-flash",
       messages: [
         { role: "system", content: charPersonality }, // A personalidade SEMPRE inteira aqui
         { role: "system", content: `Resumo do histórico: ${summary}` },
