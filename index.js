@@ -1,4 +1,3 @@
-
 import express from "express";
 import axios from "axios";
 import bodyParser from "body-parser";
@@ -9,12 +8,10 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json({ limit: "10mb" })); // aumenta limite de payload
+app.use(bodyParser.json({ limit: "10mb" }));
 
-// Função simples de resumo de mensagens antigas
 async function summarizeMessages(oldMessages) {
   const text = oldMessages.map(msg => `${msg.role}: ${msg.content}`).join("\n");
-  // Se for muito grande, cortar mantendo o final
   return text.length > 2000 ? text.slice(-2000) + "..." : text;
 }
 
@@ -30,22 +27,27 @@ app.post("/v1/chat/completions", async (req, res) => {
     const oldMessages = messages.slice(0, -50);
     const summary = await summarizeMessages(oldMessages);
 
-    // Separe a definição do personagem (que não deve ser resumida)
     const charPersonality = messages.find(m => m.role === 'system')?.content || "";
     
     const payload = {
-      model:"deepseek-ai/deepseek-v4.1-flash",
+      model: "deepseek-ai/deepseek-v4.1-flash",
       messages: [
-        { role: "system", content: charPersonality }, // A personalidade SEMPRE inteira aqui
+        { role: "system", content: charPersonality },
         { role: "system", content: `Resumo do histórico: ${summary}` },
         ...lastMessages
       ],
-      max_tokens: 16384, 
+      max_tokens: 16384, // Você pode manter o limite alto agora com segurança!
       temperature: 0.6,
-      top_p: 0.95
+      top_p: 0.95,
+      stream: true // <--- ATIVA O STREAMING NA API
     };
 
-    // Pega a resposta da NVIDIA
+    // Configura os headers para Server-Sent Events (SSE)
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    // Faz a requisição para a NVIDIA esperando um stream de dados
     const response = await axios.post(
       process.env.NVIDIA_API_URL,
       payload,
@@ -53,44 +55,35 @@ app.post("/v1/chat/completions", async (req, res) => {
         headers: {
           "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
           "Content-Type": "application/json"
-        }
+        },
+        responseType: "stream" // <--- TRATA A RESPOSTA COMO UM FLUXO DE DADOS
       }
     );
 
-    // 1. Criamos uma cópia dos dados para não dar erro de referência
-    let responseData = response.data;
+    // Repassa os pedaços (chunks) recebidos da NVIDIA diretamente para o Janitor AI
+    response.data.on("data", (chunk) => {
+      // Opcional: Se quiser filtrar as tags <think> em tempo real, você pode tratá-las aqui.
+      // Por segurança e compatibilidade com o formato OpenAI/Janitor, repassamos o stream bruto:
+      res.write(chunk);
+    });
 
-    // 2. Localizamos onde está o texto (normalmente em choices[0].message.content)
-    if (responseData.choices && responseData.choices[0]) {
-      let message = responseData.choices[0].message;
-      let content = message.content || "";
+    response.data.on("end", () => {
+      res.end();
+    });
 
-      console.log("--- TEXTO RECEBIDO ---");
-      console.log(content.substring(0, 100) + "..."); // Isso vai mostrar no seu terminal se o <think> chegou
+    response.data.on("error", (err) => {
+      console.error("Erro no stream da NVIDIA:", err);
+      res.end();
+    });
 
-      // 3. REMOÇÃO AGRESSIVA:
-      // Remove o bloco completo <think>...</think>
-      content = content.replace(/<think>[\s\S]*?<\/think>/gi, "");
-      
-      // Remove tags <think> ou </think> que sobraram sozinhas
-      content = content.replace(/<\/?think>/gi, "");
-      
-      // Remove qualquer coisa que tenha sobrado se o modelo foi cortado no meio do pensamento
-      content = content.replace(/^[\s\S]*?<\/think>/gi, ""); 
-
-      // 4. Devolve o texto limpo para o objeto
-      responseData.choices[0].message.content = content.trim();
-      
-    }
-
-    // Envia para o Janitor AI
-    res.json(responseData);
   } catch (err) {
     console.error("ERRO DA NVIDIA:", err.response?.data || err.message);
-    res.status(500).json({ 
-      error: "Erro na NVIDIA", 
-      detalhes: err.response?.data?.body?.detail || err.message 
-    });
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: "Erro na NVIDIA", 
+        detalhes: err.message 
+      });
+    }
   }
 });
 
