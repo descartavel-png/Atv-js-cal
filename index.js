@@ -18,132 +18,81 @@ async function summarizeMessages(oldMessages) {
   return text.length > 2000 ? text.slice(-2000) + "..." : text;
 }
 
-app.post("/v1/chat/completions", async (req, res) => { try { const { messages } = req.body;
+app.post("/v1/chat/completions", async (req, res) => {
+  try {
+    const { messages } = req.body;
 
-if (!messages || !Array.isArray(messages)) {
-  return res.status(400).json({ error: "messages precisa ser um array" });
-}
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: "messages precisa ser um array" });
+    }
 
-const lastMessages = messages.slice(-50);
-const oldMessages = messages.slice(0, -50);
-const summary = await summarizeMessages(oldMessages);
+    const lastMessages = messages.slice(-50);
+    const oldMessages = messages.slice(0, -50);
+    const summary = await summarizeMessages(oldMessages);
 
-const charPersonality = messages.find(m => m.role === 'system')?.content || "";
+    // Separe a definição do personagem (que não deve ser resumida)
+    const charPersonality = messages.find(m => m.role === 'system')?.content || "";
+    
+    const payload = {
+      model:"deepseek-ai/deepseek-v4.1-flash",
+      messages: [
+        { role: "system", content: charPersonality }, // A personalidade SEMPRE inteira aqui
+        { role: "system", content: `Resumo do histórico: ${summary}` },
+        ...lastMessages
+      ],
+      max_tokens: 16384, 
+      temperature: 0.6,
+      top_p: 0.95
+    };
 
-const payload = {
-  model: "deepseek-ai/deepseek-v4.1-flash",
-  messages: [
-    { role: "system", content: charPersonality },
-    { role: "system", content: `Resumo do histórico: ${summary}` },
-    ...lastMessages
-  ],
-  max_tokens: 16384,
-  temperature: 0.6,
-  top_p: 0.95,
-  stream: true
-};
-
-const response = await axios.post(
-  process.env.NVIDIA_API_URL,
-  payload,
-  {
-    headers: {
-      "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream"
-    },
-    responseType: "stream",
-    timeout: 0
-  }
-);
-
-res.status(200);
-res.setHeader("Content-Type", "text/event-stream");
-res.setHeader("Cache-Control", "no-cache, no-transform");
-res.setHeader("Connection", "keep-alive");
-res.setHeader("X-Accel-Buffering", "no");
-res.flushHeaders();
-
-let buffer = "";
-
-response.data.on("data", (chunk) => {
-  buffer += chunk.toString();
-
-  const lines = buffer.split("\n");
-  buffer = lines.pop();
-
-  for (const line of lines) {
-    if (!line.startsWith("data:")) continue;
-
-    const data = line.slice(5).trim();
-
-    if (!data || data === "[DONE]") {
-      if (data === "[DONE]") {
-        res.write("data: [DONE]\n\n");
+    // Pega a resposta da NVIDIA
+    const response = await axios.post(
+      process.env.NVIDIA_API_URL,
+      payload,
+      {
+        headers: {
+          "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
+          "Content-Type": "application/json"
+        }
       }
-      continue;
+    );
+
+    // 1. Criamos uma cópia dos dados para não dar erro de referência
+    let responseData = response.data;
+
+    // 2. Localizamos onde está o texto (normalmente em choices[0].message.content)
+    if (responseData.choices && responseData.choices[0]) {
+      let message = responseData.choices[0].message;
+      let content = message.content || "";
+
+      console.log("--- TEXTO RECEBIDO ---");
+      console.log(content.substring(0, 100) + "..."); // Isso vai mostrar no seu terminal se o <think> chegou
+
+      // 3. REMOÇÃO AGRESSIVA:
+      // Remove o bloco completo <think>...</think>
+      content = content.replace(/<think>[\s\S]*?<\/think>/gi, "");
+      
+      // Remove tags <think> ou </think> que sobraram sozinhas
+      content = content.replace(/<\/?think>/gi, "");
+      
+      // Remove qualquer coisa que tenha sobrado se o modelo foi cortado no meio do pensamento
+      content = content.replace(/^[\s\S]*?<\/think>/gi, ""); 
+
+      // 4. Devolve o texto limpo para o objeto
+      responseData.choices[0].message.content = content.trim();
+      
     }
 
-    try {
-      const parsed = JSON.parse(data);
-
-      const content = parsed.choices?.[0]?.delta?.content;
-
-      if (content) {
-        parsed.choices[0].delta.content = content
-          .replace(/<think>[\s\S]*?<\/think>/gi, "")
-          .replace(/<\/?think>/gi, "");
-      }
-
-      res.write(`data: ${JSON.stringify(parsed)}\n\n`);
-    } catch (e) {
-      console.error("Erro ao processar chunk:", e.message);
-    }
+    // Envia para o Janitor AI
+    res.json(responseData);
+  } catch (err) {
+    console.error("ERRO DA NVIDIA:", err.response?.data || err.message);
+    res.status(500).json({ 
+      error: "Erro na NVIDIA", 
+      detalhes: err.response?.data?.body?.detail || err.message 
+    });
   }
 });
-
-response.data.on("end", () => {
-  if (buffer.trim().startsWith("data:")) {
-    const data = buffer.trim().slice(5).trim();
-
-    if (data && data !== "[DONE]") {
-      try {
-        const parsed = JSON.parse(data);
-        res.write(`data: ${JSON.stringify(parsed)}\n\n`);
-      } catch (e) {}
-    }
-  }
-
-  if (!res.writableEnded) {
-    res.end();
-  }
-});
-
-response.data.on("error", (err) => {
-  console.error("Erro no streaming:", err.message);
-  if (!res.writableEnded) res.end();
-});
-
-req.on("close", () => {
-  if (!res.writableEnded) {
-    response.data.destroy();
-  }
-});
-
-
-} catch (err) { console.error("ERRO DA NVIDIA:", err.response?.data || err.message);
-
-if (!res.headersSent) {
-  res.status(500).json({
-    error: "Erro na NVIDIA",
-    detalhes: err.message
-  });
-} else {
-  res.end();
-}
-
-
-} });
 
 app.listen(process.env.PORT || 3000, () => {
   console.log(`API rodando na porta ${process.env.PORT || 3000}`);
