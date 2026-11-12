@@ -1,144 +1,233 @@
-
 import express from "express";
 import axios from "axios";
-import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import cors from "cors";
 
 dotenv.config();
 
 const app = express();
+
 app.use(cors());
-app.use(bodyParser.json({ limit: "10mb" }));
+app.use(express.json({ limit: "10mb" }));
+
+const PORT = process.env.PORT || 3000;
 
 async function summarizeMessages(oldMessages) {
-  const text = oldMessages
-    .map(msg => `${msg.role}: ${msg.content}`)
-    .join("\n");
+    const text = oldMessages
+        .map(msg => `${msg.role}: ${msg.content}`)
+        .join("\n");
 
-  return text.length > 2000
-    ? text.slice(-2000) + "..."
-    : text;
+    return text.length > 2000
+        ? text.slice(-2000) + "..."
+        : text;
 }
 
 app.post("/v1/chat/completions", async (req, res) => {
-  try {
-    const { messages, stream = true } = req.body;
+    const controller = new AbortController();
 
-    if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({
-        error: "messages precisa ser um array"
-      });
+    let heartbeat;
+    let upstream;
+
+    try {
+        const { messages, stream = true } = req.body;
+
+        if (!Array.isArray(messages)) {
+            return res.status(400).json({
+                error: "messages precisa ser um array"
+            });
+        }
+
+        if (!process.env.NVIDIA_API_URL || !process.env.NVIDIA_API_KEY) {
+            return res.status(500).json({
+                error: "NVIDIA API configuration missing"
+            });
+        }
+
+        const systemMessage = messages.find(
+            m => m.role === "system"
+        )?.content || "";
+
+        const conversation = messages.filter(
+            m => m.role !== "system"
+        );
+
+        const lastMessages = conversation.slice(-30);
+        const oldMessages = conversation.slice(0, -30);
+
+        const summary = await summarizeMessages(oldMessages);
+
+        const payload = {
+            model: "deepseek-ai/deepseek-v4.1-flash",
+
+            messages: [
+                {
+                    role: "system",
+                    content: systemMessage
+                },
+                {
+                    role: "system",
+                    content: `Resumo do histórico: ${summary}`
+                },
+                ...lastMessages
+            ],
+
+            max_tokens: 16384,
+            temperature: 0.6,
+            top_p: 0.95,
+            stream: stream
+        };
+
+        // =================================
+        // STREAMING MODE
+        // =================================
+
+        if (stream) {
+
+            res.status(200);
+
+            res.setHeader(
+                "Content-Type",
+                "text/event-stream; charset=utf-8"
+            );
+
+            res.setHeader(
+                "Cache-Control",
+                "no-cache, no-transform"
+            );
+
+            res.setHeader(
+                "Connection",
+                "keep-alive"
+            );
+
+            res.setHeader(
+                "X-Accel-Buffering",
+                "no"
+            );
+
+            res.flushHeaders();
+
+            // Send heartbeat to keep connection alive
+            heartbeat = setInterval(() => {
+                if (!res.destroyed && !res.writableEnded) {
+                    res.write(": ping\n\n");
+                }
+            }, 10000);
+
+            // Cancel NVIDIA request if client disconnects
+            res.on("close", () => {
+                clearInterval(heartbeat);
+
+                if (!res.writableEnded) {
+                    controller.abort();
+                }
+            });
+
+            upstream = await axios.post(
+                process.env.NVIDIA_API_URL,
+                payload,
+                {
+                    responseType: "stream",
+
+                    timeout: 180000,
+
+                    signal: controller.signal,
+
+                    headers: {
+                        Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+                        "Content-Type": "application/json",
+                        Accept: "text/event-stream"
+                    }
+                }
+            );
+
+            // Forward NVIDIA stream
+            upstream.data.on("data", chunk => {
+                if (!res.destroyed && !res.writableEnded) {
+                    res.write(chunk);
+                }
+            });
+
+            upstream.data.on("end", () => {
+                clearInterval(heartbeat);
+
+                if (!res.destroyed && !res.writableEnded) {
+                    res.end();
+                }
+            });
+
+            upstream.data.on("error", err => {
+                console.error("NVIDIA STREAM ERROR:", err.message);
+
+                clearInterval(heartbeat);
+
+                if (!res.destroyed && !res.writableEnded) {
+                    res.end();
+                }
+            });
+
+            return;
+        }
+
+        // =================================
+        // NON-STREAMING MODE
+        // =================================
+
+        const response = await axios.post(
+            process.env.NVIDIA_API_URL,
+            payload,
+            {
+                timeout: 180000,
+
+                headers: {
+                    Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
+
+        return res.status(200).json(response.data);
+
+    } catch (err) {
+
+        clearInterval(heartbeat);
+
+        if (err.response) {
+            console.error(
+                "NVIDIA STATUS:",
+                err.response.status
+            );
+
+            console.error(
+                "NVIDIA ERROR:",
+                err.message
+            );
+        } else {
+            console.error(
+                "SERVER ERROR:",
+                err.message
+            );
+        }
+
+        if (!res.headersSent) {
+            return res.status(
+                err.response?.status || 500
+            ).json({
+                error: "NVIDIA API Error",
+                details: err.message
+            });
+        }
+
+        if (!res.destroyed && !res.writableEnded) {
+            res.end();
+        }
     }
-
-    const lastMessages = messages.slice(-50);
-    const oldMessages = messages.slice(0, -50);
-
-    const summary = await summarizeMessages(oldMessages);
-
-    const charPersonality =
-      messages.find(m => m.role === "system")?.content || "";
-
-    const payload = {
-      model: "deepseek-ai/deepseek-v4.1-flash",
-      messages: [
-        { role: "system", content: charPersonality },
-        { role: "system", content: `Resumo do histórico: ${summary}` },
-        ...lastMessages
-      ],
-      max_tokens: 16384,
-      temperature: 0.6,
-      top_p: 0.95,
-      stream: stream
-    };
-
-    // STREAMING MODE
-    if (stream) {
-      const response = await axios.post(
-        process.env.NVIDIA_API_URL,
-        payload,
-        {
-          responseType: "stream",
-          headers: {
-            "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream"
-          }
-        }
-      );
-
-      // Forward SSE headers
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no");
-
-      res.flushHeaders();
-
-      // Forward NVIDIA stream directly to Janitor AI
-      response.data.on("data", chunk => {
-        if (!res.destroyed) {
-          res.write(chunk);
-        }
-      });
-
-      response.data.on("end", () => {
-        if (!res.destroyed) {
-          res.end();
-        }
-      });
-
-      response.data.on("error", err => {
-        console.error("STREAM ERROR:", err.message);
-
-        if (!res.destroyed) {
-          res.end();
-        }
-      });
-
-      // Stop NVIDIA request if client disconnects
-      req.on("close", () => {
-        if (!res.writableEnded) {
-          response.data.destroy();
-        }
-      });
-
-      return;
-    }
-
-    // NON-STREAMING MODE
-    const response = await axios.post(
-      process.env.NVIDIA_API_URL,
-      payload,
-      {
-        headers: {
-          "Authorization": `Bearer ${process.env.NVIDIA_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    res.json(response.data);
-
-  } catch (err) {
-    console.error(
-      "ERRO DA NVIDIA:",
-      err.response?.data || err.message
-    );
-
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: "Erro na NVIDIA",
-        detalhes: err.response?.data?.body?.detail || err.message
-      });
-    } else {
-      res.end();
-    }
-  }
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`API rodando na porta ${process.env.PORT || 3000}`);
+// =================================
+// START SERVER
+// =================================
+
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`API running on port ${PORT}`);
 });
-
-
