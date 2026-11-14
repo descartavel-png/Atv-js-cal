@@ -192,7 +192,7 @@ app.post("/v1/chat/completions", async (req, res) => {
             process.env.NVIDIA_API_URL,
             payload,
             {
-                timeout: 180000,
+                timeout: 3600000,
                 signal: controller.signal,
                 headers: {
                     Authorization:
