@@ -112,7 +112,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                 if (!res.destroyed && !res.writableEnded) {
                     res.write(": ping\n\n");
                 }
-            }, 1000);
+            }, 10000);
 
             // Cancel NVIDIA request if client disconnects
             res.on("close", () => {
@@ -123,31 +123,38 @@ app.post("/v1/chat/completions", async (req, res) => {
                 }
             });
 
-            upstream = await axios.post(
-                process.env.NVIDIA_API_URL,
-                payload,
-                {
-                    responseType: "stream",
+console.log("REQUEST RECEIVED:", new Date().toISOString());
 
-                    timeout: 180000,
+upstream = await axios.post(
+    process.env.NVIDIA_API_URL,
+    payload,
+    {
+        responseType: "stream",
+        timeout: 180000,
+        signal: controller.signal,
+        headers: {
+            Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+            "Content-Type": "application/json",
+            Accept: "text/event-stream"
+        }
+    }
+);
 
-                    signal: controller.signal,
+console.log("NVIDIA CONNECTED:", new Date().toISOString());
 
-                    headers: {
-                        Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
-                        "Content-Type": "application/json",
-                        Accept: "text/event-stream"
-                    }
-                }
-            );
+let firstChunk = true;
 
-            // Forward NVIDIA stream
-            upstream.data.on("data", chunk => {
-                if (!res.destroyed && !res.writableEnded) {
-                    res.write(chunk);
-                }
-            });
+upstream.data.on("data", chunk => {
 
+    if (firstChunk) {
+        console.log("FIRST NVIDIA CHUNK:", new Date().toISOString());
+        firstChunk = false;
+    }
+
+    if (!res.destroyed && !res.writableEnded) {
+        res.write(chunk);
+    }
+});
             upstream.data.on("end", () => {
                 clearInterval(heartbeat);
 
