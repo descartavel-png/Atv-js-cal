@@ -112,7 +112,7 @@ app.post("/v1/chat/completions", async (req, res) => {
                 if (!res.destroyed && !res.writableEnded) {
                     res.write(": ping\n\n");
                 }
-            }, 10000);
+            }, 1000);
 
             // Cancel NVIDIA request if client disconnects
             res.on("close", () => {
