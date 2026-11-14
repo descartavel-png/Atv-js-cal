@@ -7,6 +7,18 @@ dotenv.config();
 
 const app = express();
 
+app.use((req, res, next) => {
+    console.log("================================");
+    console.log("INCOMING REQUEST");
+    console.log("Method:", req.method);
+    console.log("Path:", req.originalUrl);
+    console.log("Time:", new Date().toISOString());
+    console.log("Content-Type:", req.headers["content-type"]);
+    console.log("================================");
+
+    next();
+});
+
 app.get("/health", (req, res) => {
     console.log("HEALTH CHECK RECEIVED");
 
