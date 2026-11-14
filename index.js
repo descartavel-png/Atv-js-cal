@@ -130,10 +130,12 @@ app.post("/v1/chat/completions", async (req, res) => {
 
             // Send heartbeat to keep connection alive
             heartbeat = setInterval(() => {
-                if (!res.destroyed && !res.writableEnded) {
-                    res.write(": ping\n\n");
-                }
-            }, 10000);
+    if (!res.destroyed && !res.writableEnded) {
+        res.write(": keep-alive\n\n");
+    }
+}, 10000);
+
+res.write(": connected\n\n");
 
             // Cancel NVIDIA request if client disconnects
             res.on("close", () => {
@@ -145,6 +147,8 @@ app.post("/v1/chat/completions", async (req, res) => {
             });
 
 console.log("REQUEST RECEIVED:", new Date().toISOString());
+
+            console.log("NVIDIA REQUEST STARTED:", new Date().toISOString());
 
 upstream = await axios.post(
     process.env.NVIDIA_API_URL,
@@ -159,6 +163,15 @@ upstream = await axios.post(
             Accept: "text/event-stream"
         }
     }
+);
+
+            console.log("NVIDIA CONNECTION ESTABLISHED:", new Date().toISOString());
+
+console.log("NVIDIA STATUS:", upstream.status);
+
+console.log(
+    "NVIDIA CONTENT TYPE:",
+    upstream.headers["content-type"]
 );
 
 console.log("NVIDIA CONNECTED:", new Date().toISOString());
